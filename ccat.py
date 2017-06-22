@@ -14,7 +14,7 @@ import pygments
 from pygments import formatters, lexers, styles
 
 NAME = 'ColorCat'
-VERSION = '0.2.4'
+VERSION = '0.4.0'
 VERSIONSTR = '{} v. {}'.format(NAME, VERSION)
 SCRIPT = os.path.split(os.path.abspath(sys.argv[0]))[1]
 SCRIPTDIR = os.path.abspath(sys.path[0])
@@ -24,7 +24,7 @@ USAGESTR = """{versionstr}
 Usage:
     {script} -h | -v
     {script} [FILE...] [-b style] [-f name] [-g | -l name] [-s name]
-         [-c | -C] [-D] [-n | -N] [-p]
+         [-c | -C] [-D] [-n | -N] [-p] [--nosave]
     {script} -F | -L | -S
 
 Options:
@@ -46,6 +46,7 @@ Options:
     -n,--linenos                 : Print line numbers.
     -N,--nolinenos               : Don't print line numbers.
                                    Overrides config setting.
+    --nosave                     : Don't save options in config file.
     -p,--printnames              : Print file names.
     -s name,--style name         : Use this pygments style name.
     -S,--styles                  : List all known style names.
@@ -60,7 +61,7 @@ CONFIGOPTS = (
     'linenos',
     'style'
 )
-
+NON_JSON_KEYS = {'formatfilename', 'printargs'}
 
 # Known terminal-friendly formatters.
 FORMATTERS = {
@@ -81,7 +82,6 @@ DEBUG = False
 
 def main(argd):
     """ Main entry point, expects doctopt arg dict as argd """
-
     if argd['--lexers']:
         return 0 if print_lexers() else 1
     elif argd['--styles']:
@@ -89,7 +89,10 @@ def main(argd):
     elif argd['--formatters']:
         return 0 if print_formatters() else 1
     # Print files.
-    return 0 if print_files(argd) else 1
+    config = parse_printer_config(argd)
+    if argd['--nosave']:
+        return 0 if print_files(config) else 1
+    return 0 if (print_files(config) and save_config(config)) else 1
 
 
 def filename_is_stdin(s):
@@ -113,7 +116,7 @@ def get_line_formatter(maxnum, linenos=True):
 
         def formatline(i, l):
             """ Line formatter, with line numbers. """
-            return '{}: {}'.format(color(ln.zfill(width), fore='cyan'), l)
+            return '{}: {}'.format(color(str(i).zfill(width), fore='cyan'), l)
         return formatline
 
     def formatline(i, l):
@@ -161,6 +164,7 @@ def handle_stdin(config):
         # No colors, no pygments.
         return pipe_file(sys.stdin, **config['printargs'])
     return print_file(sys.stdin, **config['printargs'])
+
 
 # Only read stdin once, but can be mixed in with other files.
 # This is set to True if stdin has been read already.
@@ -280,10 +284,9 @@ def parse_printer_config(argd):
         'debug': config['debug'],
     }
     if DEBUG:
-        skip_names = ('formatfilename', 'printargs')
         print_debug(
             'Final printer config',
-            {k: v for k, v in config.items() if k not in skip_names})
+            {k: v for k, v in config.items() if k not in NON_JSON_KEYS})
     return config
 
 
@@ -395,7 +398,7 @@ def print_file(fileobject, formatter, **kwargs):
     return True
 
 
-def print_files(argd):
+def print_files(config):
     """ Print several files at once. Parses user string args into usable
         objects for `print_file` (Lexer(), Formatter()).
         Decides whether to disable all lexing (just piping input/output).
@@ -403,13 +406,17 @@ def print_files(argd):
         Arguments:
             argd  : A docopt arg dict from the command line.
     """
-    config = parse_printer_config(argd)
     if not config:
         # Any user arg errors have been printed, just return.
         return False
 
     results = []
     for filename in config['FILE']:
+        try:
+            filename = filename.strip()
+        except AttributeError:
+            # Filename is None.
+            pass
         if not set_lexer(filename, config):
             return False
         if filename_is_stdin(filename):
@@ -417,7 +424,7 @@ def print_files(argd):
         else:
             results.append(handle_file(filename, config))
 
-    return save_config(config) and all(results)
+    return all(results)
 
 
 def print_formatters():
@@ -511,7 +518,23 @@ def print_styles():
 
 def save_config(config):
     """ Save the config object as json. """
+    if DEBUG:
+        debugconfig = {
+            k: v for k, v in config.items()
+            if k not in NON_JSON_KEYS
+        }
+        print_debug('Checking', value=debugconfig)
     config = {k: v for k, v in config.items() if v and (k in CONFIGOPTS)}
+    if DEBUG:
+        debugconfig = {
+            k: v for k, v in config.items()
+            if k not in NON_JSON_KEYS
+        }
+        print_debug('Valid config', value=debugconfig)
+    if not config:
+        print_debug('No config to save.')
+        return False
+    print_debug('Saving config', value=config)
     try:
         with open(CONFIG, 'w') as f:
             json.dump(config, f, indent=4, sort_keys=True)
@@ -534,16 +557,17 @@ def set_lexer(filename, config):
 
     if config['lexer']:
         # Transform the user's lexer name into a real Lexer().
+        # Filename may be stdin (None, or '-', or anything falsey).
         config['printargs']['lexer'] = try_lexer(
             config['lexer'],
             filename=filename)
         if config['printargs']['lexer']:
             return True
-        else:
-            # Lexer name was not transformed into a real Lexer().
-            print_status('Bad lexer name:', config['lexer'])
-            print_status('Use \'ccat --lexers\' to list known lexer names.')
-            return False
+
+        # Lexer name was not transformed into a real Lexer().
+        print_status('Bad lexer name:', config['lexer'])
+        print_status('Use \'ccat --lexers\' to list known lexer names.')
+        return False
     # No lexer name was given, guess it.
     config['printargs']['lexer'] = None
     return True
@@ -575,7 +599,7 @@ def try_formatter(formattername, stylename, background=None, args=None):
     formattername = formattername or 'terminal'
     formattercls = FORMATTERS[formattername]['class']
 
-    print_debug('formatter args for {}'.format(formattername), formatterargs)
+    print_debug('Formatter args for {}'.format(formattername), formatterargs)
     try:
         formatter = formattercls(**formatterargs)
     except pygments.util.ClassNotFound:
@@ -789,6 +813,7 @@ class ColorCodes(object):
             'Must be in range 0-255'))
         return ColorCodes.Invalid256Color(errmsg)
 
+
 # Alias, convenience function for ColorCodes().
 color = ColorCodes().colorword
 
@@ -857,6 +882,7 @@ def _docoptextras(help_, version, options, doc):
     if version and any((o.name == '--version') and o.value for o in options):
         print(color(version, 'blue'))
         sys.exit()
+
 
 # Functions to override default docopt stuff
 docopt.DocoptExit = _ColorDocoptExit
